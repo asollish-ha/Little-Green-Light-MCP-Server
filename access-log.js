@@ -36,7 +36,7 @@ async function loadOrCreateWorkbook(logPath) {
 // and warning to stderr — the caller's read must never fail because of this.
 export async function writeExcelAccessRow(constituentId, constituentName, toolName, logPath) {
   if (!logPath) {
-    console.error("[access-audit] LGL_ACCESS_LOG_PATH is not set; skipping Excel access log entry.");
+    console.error("[access-audit] No log path configured; skipping Excel access log entry.");
     return;
   }
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
