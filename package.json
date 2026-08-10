@@ -12,9 +12,11 @@
     "url": "https://github.com/WillHeadlee/Little-Green-Light-MCP-Server.git"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest"
+    "@modelcontextprotocol/sdk": "latest",
+    "exceljs": "^4.4.0"
   }
 }
