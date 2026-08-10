@@ -34,6 +34,11 @@ async function loadOrCreateWorkbook(logPath) {
 // exist yet. Best-effort: never throws. If the file is locked (e.g. open in
 // Excel) or the write otherwise fails, retries a few times before giving up
 // and warning to stderr — the caller's read must never fail because of this.
+// NOTE: Multiple concurrent calls targeting the same logPath can race on the
+// read-modify-write of the .xlsx file (no locking or serialization), and one
+// write can silently overwrite another's row. This is an accepted trade-off for
+// a best-effort audit log — the log is not a source of truth, and truly
+// simultaneous overlapping accesses are expected to be rare in practice.
 export async function writeExcelAccessRow(constituentId, constituentName, toolName, logPath) {
   if (!logPath) {
     console.error("[access-audit] No log path configured; skipping Excel access log entry.");
