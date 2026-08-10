@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { logAccessEntry } from "./access-log.js";
 
 const LGL_BASE = "https://api.littlegreenlight.com/api/v1";
 const API_KEY = process.env.LGL_API_KEY;
@@ -130,39 +131,10 @@ async function resolveDefaultNoteTypeId() {
 }
 
 // ─── Access Audit Logging ────────────────────────────────────────────────────
-// Writes a note directly to the LGL API (not the Integration Queue — this
-// needs to fire unattended, not wait on human approval) whenever a tool opens
-// a single constituent's file. This is itself a write, so it's gated the same
-// way as any other assisted-tier write: it fires in full mode and in assisted
-// mode (LGL_READ_ONLY=true + LGL_ASSISTED_MODE=true), and is silently skipped
-// under strict read-only, where the whole point is to leave zero footprint.
-// Scoped to single-record detail views only (get_constituent,
-// get_donor_context, export_constituent_profile) — bulk list_*/search_* calls
-// do not log, since noting every row of a 50-record list would flood
-// constituents' note history. Best-effort: a logging failure never fails the
-// read that triggered it.
-async function logAccessNote(constituentId, toolName) {
-  if (READ_ONLY_MODE && !ASSISTED_MODE) return;
-  try {
-    const now = new Date();
-    const noteDate = now.toISOString().slice(0, 10);
-    const timestamp = now.toISOString().replace("T", " ").slice(0, 16) + " UTC";
-    const noteTypeId = await resolveDefaultNoteTypeId();
-    const body = {
-      // The "[AI Access Log]" text prefix is what actually makes these notes
-      // identifiable/filterable — note_type_id just points at whatever
-      // generic type this account has (e.g. "General"), since LGL doesn't
-      // auto-create a new named type from a direct API write the way the
-      // Integration Queue's field mapping does.
-      text: `[AI Access Log] Record accessed via LGL MCP Server (${toolName}) on ${timestamp}.`,
-      note_date: noteDate,
-    };
-    if (noteTypeId !== null) body.note_type_id = noteTypeId;
-    await lglRequest("POST", `/constituents/${constituentId}/notes`, body);
-  } catch (err) {
-    console.error(`[access-audit] Failed to log note for constituent ${constituentId}: ${err.message}`);
-  }
-}
+// See access-log.js for the writeLglAccessNote/writeExcelAccessRow/
+// logAccessEntry implementation. LGL_ACCESS_LOG_DESTINATION selects which
+// mechanism runs (see README "Access Audit Logging" for details); the three
+// call sites below build the deps object logAccessEntry needs and pass it in.
 
 // ─── LGL Integration Queue (human-reviewed writes) ──────────────────────────
 // Posts flat key/value pairs to LGL's own custom-integration webhook listener
@@ -372,7 +344,7 @@ function summaryConstituent(c) {
 // tools used to always fall back to "ID {id}". Batch-resolve real names from
 // /constituents/{id} for the result set instead. This is a bulk read used to
 // label an aggregate report, not a single-record detail view, so it
-// deliberately skips logAccessNote the same way list_*/search_* calls do.
+// deliberately skips the access log the same way list_*/search_* calls do.
 // Capped so a huge unique-donor set doesn't fan out unbounded; anything past
 // the cap keeps the "ID {id}" fallback.
 const NAME_RESOLVE_CAP = 100;
@@ -803,7 +775,7 @@ const TOOLS = [
   },
   {
     name: "get_constituent",
-    description: "Get full details for a single constituent by ID. Writes an 'AI Access Log' note directly to that constituent's record noting when and by which tool it was accessed — this happens automatically in full and assisted (LGL_ASSISTED_MODE=true) modes, and is silently skipped under strict LGL_READ_ONLY.",
+    description: "Get full details for a single constituent by ID. Logs this access for audit purposes — either as an '[AI Access Log]' note on the constituent's LGL record, or as a row in a local Excel file, depending on LGL_ACCESS_LOG_DESTINATION. The LGL-note destination only fires in full and assisted (LGL_ASSISTED_MODE=true) modes and is silently skipped under strict LGL_READ_ONLY; the Excel destination fires in every mode.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1999,7 +1971,7 @@ const TOOLS = [
   },
   {
     name: "get_donor_context",
-    description: "One-shot lookup that returns a constituent's profile plus their recent giving history, group memberships, and recent notes. Saves 4-5 round trips compared to calling get_constituent + list_gifts + list_group_memberships + list_notes separately for the common 'tell me about <donor>' workflow. Accepts either constituent_id (preferred) or name (resolved via search; errors with candidates if multiple constituents match). Writes an 'AI Access Log' note directly to that constituent's record noting when and by which tool it was accessed — this happens automatically in full and assisted (LGL_ASSISTED_MODE=true) modes, and is silently skipped under strict LGL_READ_ONLY.",
+    description: "One-shot lookup that returns a constituent's profile plus their recent giving history, group memberships, and recent notes. Saves 4-5 round trips compared to calling get_constituent + list_gifts + list_group_memberships + list_notes separately for the common 'tell me about <donor>' workflow. Accepts either constituent_id (preferred) or name (resolved via search; errors with candidates if multiple constituents match). Logs this access for audit purposes — either as an '[AI Access Log]' note on the constituent's LGL record, or as a row in a local Excel file, depending on LGL_ACCESS_LOG_DESTINATION. The LGL-note destination only fires in full and assisted (LGL_ASSISTED_MODE=true) modes and is silently skipped under strict LGL_READ_ONLY; the Excel destination fires in every mode.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2012,7 +1984,7 @@ const TOOLS = [
   },
   {
     name: "export_constituent_profile",
-    description: "Comprehensive one-shot export of everything LGL has on a constituent, mirroring LGL's own 'Export Profile' button: full record (contact info embedded), full gift history, relationships, class/school affiliations, memberships, volunteer time, contact reports, appeal requests, event invitations, group memberships, and notes — fetched in parallel in a single call. Slower and heavier than get_donor_context; prefer that for a quick 'tell me about <donor>' lookup and use this when you actually need everything. Accepts either constituent_id (preferred) or name (resolved via search; errors with candidates if multiple match). Writes an 'AI Access Log' note directly to the constituent's record — this happens automatically in full and assisted (LGL_ASSISTED_MODE=true) modes, and is silently skipped under strict LGL_READ_ONLY.",
+    description: "Comprehensive one-shot export of everything LGL has on a constituent, mirroring LGL's own 'Export Profile' button: full record (contact info embedded), full gift history, relationships, class/school affiliations, memberships, volunteer time, contact reports, appeal requests, event invitations, group memberships, and notes — fetched in parallel in a single call. Slower and heavier than get_donor_context; prefer that for a quick 'tell me about <donor>' lookup and use this when you actually need everything. Accepts either constituent_id (preferred) or name (resolved via search; errors with candidates if multiple match). Logs this access for audit purposes — either as an '[AI Access Log]' note on the constituent's LGL record, or as a row in a local Excel file, depending on LGL_ACCESS_LOG_DESTINATION. The LGL-note destination only fires in full and assisted (LGL_ASSISTED_MODE=true) modes and is silently skipped under strict LGL_READ_ONLY; the Excel destination fires in every mode.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2271,7 +2243,14 @@ async function handleTool(name, args, authInfo) {
 
     case "get_constituent": {
       const constituent = await lglRequest("GET", `/constituents/${args.id}`);
-      await logAccessNote(args.id, "get_constituent");
+      await logAccessEntry(args.id, summaryConstituent(constituent).name, "get_constituent", {
+        lglRequest,
+        resolveDefaultNoteTypeId,
+        readOnlyMode: READ_ONLY_MODE,
+        assistedMode: ASSISTED_MODE,
+        destination: process.env.LGL_ACCESS_LOG_DESTINATION,
+        logPath: process.env.LGL_ACCESS_LOG_PATH,
+      });
       return toText(constituent);
     }
 
@@ -3215,15 +3194,28 @@ async function handleTool(name, args, authInfo) {
 
       // Fan out the dependent reads. Group memberships and notes are optional
       // (not every account exposes them on every constituent), so swallow
-      // 404s on those rather than failing the whole context call. The audit
-      // note runs alongside these rather than blocking on them.
+      // 404s on those rather than failing the whole context call. The access
+      // log runs after these resolve (not alongside) so it can use the
+      // already-fetched constituent's name without a second lookup. Trade-off:
+      // if the primary constituent fetch (which has no .catch) rejects, the
+      // whole Promise.all throws and we never reach the log call below, so a
+      // failed access attempt goes unlogged — a deliberate change from the old
+      // fire-and-forget-inside-Promise.all behavior, since there's no name to
+      // log for a record that was never successfully fetched.
       const [constituent, giftsData, groupsData, notesData] = await Promise.all([
         lglRequest("GET", `/constituents/${id}`),
         lglRequest("GET", `/constituents/${id}/gifts?limit=${giftLimit}`).catch((e) => ({ _error: e.message })),
         lglRequest("GET", `/constituents/${id}/group_memberships`).catch((e) => ({ _error: e.message })),
         lglRequest("GET", `/constituents/${id}/notes?limit=${noteLimit}`).catch((e) => ({ _error: e.message })),
-        logAccessNote(id, "get_donor_context"),
       ]);
+      await logAccessEntry(id, summaryConstituent(constituent).name, "get_donor_context", {
+        lglRequest,
+        resolveDefaultNoteTypeId,
+        readOnlyMode: READ_ONLY_MODE,
+        assistedMode: ASSISTED_MODE,
+        destination: process.env.LGL_ACCESS_LOG_DESTINATION,
+        logPath: process.env.LGL_ACCESS_LOG_PATH,
+      });
 
       const recentGifts = giftsData._error
         ? { error: giftsData._error }
@@ -3251,6 +3243,15 @@ async function handleTool(name, args, authInfo) {
       const fetchOptional = (path) => lglRequest("GET", path).catch((e) => ({ _error: e.message }));
       const unwrap = (data) => (data?._error ? { error: data._error } : (data.items ?? data));
 
+      // The access log runs after Promise.all resolves (not alongside, as it
+      // did before) so it can use the already-fetched constituent's name
+      // without a second lookup. Trade-off: if the primary constituent fetch
+      // (which has no .catch, unlike the fetchOptional-wrapped sub-resources)
+      // rejects, the whole Promise.all throws and we never reach the log call
+      // below, so a failed access attempt goes unlogged — a deliberate change
+      // from the old fire-and-forget-inside-Promise.all behavior, since
+      // there's no name to log for a record that was never successfully
+      // fetched.
       const [
         constituent, giftsData, groupsData, notesData,
         relationshipsData, classAffiliationsData, membershipsData,
@@ -3269,8 +3270,15 @@ async function handleTool(name, args, authInfo) {
         fetchOptional(`/constituents/${id}/appeal_requests`),
         fetchOptional(`/constituents/${id}/invitations`),
         fetchOptional(`/constituents/${id}/categories`),
-        logAccessNote(id, "export_constituent_profile"),
       ]);
+      await logAccessEntry(id, summaryConstituent(constituent).name, "export_constituent_profile", {
+        lglRequest,
+        resolveDefaultNoteTypeId,
+        readOnlyMode: READ_ONLY_MODE,
+        assistedMode: ASSISTED_MODE,
+        destination: process.env.LGL_ACCESS_LOG_DESTINATION,
+        logPath: process.env.LGL_ACCESS_LOG_PATH,
+      });
 
       const giftsUnwrapped = unwrap(giftsData);
       const gifts = Array.isArray(giftsUnwrapped)

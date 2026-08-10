@@ -17,7 +17,7 @@ A direct, secure, and high-fidelity Model Context Protocol (MCP) Server for the 
 - **Document Links:** `log_document_link` records a note pointing at a file hosted elsewhere (OneDrive/SharePoint/etc.) — LGL's API has no file-upload endpoint, so this is a reference, not a real attachment. See [API Gaps & Workarounds](#api-gaps--workarounds) below.
 - **Groups as Saved Lists:** `create_group_with_members` creates a group and adds constituents to it in one call — the closest API-native substitute for LGL's UI-only dynamic Lists, which have no create/edit endpoint. Membership writes are batched (20 at a time) rather than fired all at once, so a large constituent list doesn't blast the API with unbounded concurrent requests. See [API Gaps & Workarounds](#api-gaps--workarounds) below.
 - **Three Permission Levels:** strictly read-only, assisted (read-only plus notes and human-reviewed webhook writes), and full. See [Permission Levels](#permission-levels) below.
-- **Access Audit Trail:** `get_constituent`, `get_donor_context`, and `export_constituent_profile` automatically write an `[AI Access Log]` note directly to the constituent's record noting when it was viewed, in full and assisted modes. See [Access Audit Logging](#access-audit-logging) below.
+- **Access Audit Trail:** `get_constituent`, `get_donor_context`, and `export_constituent_profile` automatically log when they're used — as an `[AI Access Log]` note on the constituent's LGL record, or as a row in a local Excel file, depending on `LGL_ACCESS_LOG_DESTINATION`. See [Access Audit Logging](#access-audit-logging) below.
 - **Human-Reviewed Writes:** Five `submit_*_for_review` tools post to LGL's own Integration Queue webhook instead of the API, so a person approves every write in LGL before it takes effect. Available in full mode and assisted mode. See [Human-Reviewed Writes](#human-reviewed-writes-integration-queue) below.
 - **Zero-Middleware Architecture:** Data transits directly between the local AI client and the LGL API, reducing security risks and third-party fees.
 
@@ -50,6 +50,15 @@ LGL_MCP_TOKEN=your_secure_bearer_token_here
 
 # Optional: enables the submit_*_for_review tools — see "Human-Reviewed Writes" below
 LGL_INTEGRATION_LISTENER_URL=https://your-account.littlegreenlight.com/integrations/your-integration-id/listener
+
+# Optional: choose where the automatic access-audit trail is logged —
+# "lgl_note" (default) writes a note directly to LGL, "excel" appends a row
+# to a local spreadsheet instead. See "Access Audit Logging" below.
+LGL_ACCESS_LOG_DESTINATION=lgl_note
+
+# Required only when LGL_ACCESS_LOG_DESTINATION=excel — absolute path to the
+# .xlsx file to append access-log rows to.
+LGL_ACCESS_LOG_PATH=C:\path\to\AI_Access_Log.xlsx
 ```
 
 #### Permission Levels
@@ -57,7 +66,7 @@ Two env vars combine to give three permission levels:
 
 | Level | `LGL_READ_ONLY` | `LGL_ASSISTED_MODE` | What's allowed |
 |---|---|---|---|
-| **Strictly read-only** | `true` | unset/`false` | Reads only. Zero writes of any kind — no direct mutations, no notes (including the automatic access-audit note), no Integration Queue submissions. |
+| **Strictly read-only** | `true` | unset/`false` | Reads only. Zero writes of any kind — no direct mutations, no notes (including the automatic access-audit note when `LGL_ACCESS_LOG_DESTINATION=lgl_note`), no Integration Queue submissions. The Excel access-audit destination (`LGL_ACCESS_LOG_DESTINATION=excel`) still logs in this mode, since it never touches LGL. |
 | **Assisted** | `true` | `true` | Everything read-only allows, plus low-risk, easily-reviewed writes: the automatic access-audit notes, explicit `create_note`/`update_note`/`log_document_link`, and the `submit_*_for_review` Integration Queue tools. Direct mutations to constituents/gifts/groups/etc. (including `create_group_with_members`) stay blocked. |
 | **Full** | unset/`false` | *(ignored)* | Unrestricted — every tool, including direct `create_*`/`update_*`/`delete_*` mutations. |
 
@@ -78,13 +87,19 @@ All tools also publish MCP `annotations` (`readOnlyHint`, `destructiveHint`, `id
 
 ## Access Audit Logging
 
-Whenever `get_constituent`, `get_donor_context`, or `export_constituent_profile` is called in full or assisted mode, the server writes a note directly to that constituent's record in LGL — e.g. `[AI Access Log] Record accessed via LGL MCP Server (get_constituent) on 2026-07-13 17:24 UTC.` It's not a config option of its own — it rides along with whichever [permission level](#permission-levels) is active, and is silently skipped under strictly read-only, where the whole point is to leave zero footprint.
+Whenever `get_constituent`, `get_donor_context`, or `export_constituent_profile` is called, the server logs the access for audit purposes. Where that log goes is controlled by `LGL_ACCESS_LOG_DESTINATION`:
+
+- **`lgl_note` (default):** writes a note directly to that constituent's record in LGL — e.g. `[AI Access Log] Record accessed via LGL MCP Server (get_constituent) on 2026-07-13 17:24 UTC.` It rides along with whichever [permission level](#permission-levels) is active, and is silently skipped under strictly read-only, where the whole point is to leave zero footprint on LGL.
+- **`excel`:** appends a row (timestamp, tool, constituent ID, constituent name) to the `.xlsx` file at `LGL_ACCESS_LOG_PATH` instead. Fires in every mode, including strictly read-only, since it never writes to LGL at all.
+
+Deactivating a note type in LGL's UI (Settings → Menu Items → Note Types) does **not** hide existing notes of that type from a constituent's activity view, and the API can still write new notes using a deactivated type's ID — so deactivating the note type used for `lgl_note` logging doesn't reduce clutter, it only keeps that type out of the manual "new note" dropdown for staff. If note clutter on constituent records is the concern, switch to `excel` instead.
 
 A few things worth knowing:
-- **Scope is single-record detail views only.** Bulk `list_*`/`search_*` calls do *not* log — noting every row of a 50-record list would flood constituents' note history with little audit value. Only tools that open one specific donor's file do.
-- **The note writes directly via the API**, not through the Integration Queue — an audit trail that needed human approval to appear defeats the purpose.
-- **Best-effort:** if writing the note fails for any reason, the read that triggered it still succeeds; the failure is logged to stderr, not surfaced as a tool error.
-- **Note type:** LGL's write API needs an existing `note_type_id` (a number), not a type name — passing a name is silently ignored by LGL rather than applied. The server resolves this at runtime (preferring a type literally named "General", falling back to whatever type exists first) rather than hardcoding an ID, since type IDs are account-specific. This same fix applies to `create_note`/`update_note`, which previously accepted a `note_type` string that never actually applied — invalid type names now raise a clear error instead of silently creating an untyped note.
+- **Scope is single-record detail views only.** Bulk `list_*`/`search_*` calls do *not* log — noting every row of a 50-record list would flood the log with little audit value. Only tools that open one specific donor's file do.
+- **Best-effort, either destination:** if writing the log entry fails for any reason, the read that triggered it still succeeds; the failure is logged to stderr, not surfaced as a tool error. For `excel`, a locked file (e.g. open in Excel) is retried a few times before giving up.
+- **`lgl_note` writes directly via the API**, not through the Integration Queue — an audit trail that needed human approval to appear defeats the purpose. It also needs an existing `note_type_id` (a number), not a type name — passing a name is silently ignored by LGL rather than applied. The server resolves this at runtime (preferring a type literally named "General", falling back to whatever type exists first) rather than hardcoding an ID, since type IDs are account-specific. This same fix applies to `create_note`/`update_note`, which previously accepted a `note_type` string that never actually applied — invalid type names now raise a clear error instead of silently creating an untyped note.
+- **`excel` creates the file if it doesn't exist**, with a bold, frozen header row (`Timestamp`, `Tool`, `Constituent ID`, `Constituent Name`), and keeps growing indefinitely — there's no automatic rotation or archiving.
+- **`excel` isn't safe under heavy concurrency:** each write reads and rewrites the whole file with no locking, so two truly simultaneous accesses could race and one could silently overwrite the other's row. This is an accepted trade-off for a best-effort audit log — not expected to matter for typical single-client usage, but worth knowing if you're logging from multiple concurrent MCP sessions against the same file.
 
 ---
 
