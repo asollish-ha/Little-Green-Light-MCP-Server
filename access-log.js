@@ -56,3 +56,46 @@ export async function writeExcelAccessRow(constituentId, constituentName, toolNa
     }
   }
 }
+
+// Writes a note directly to the LGL API (not the Integration Queue — this
+// needs to fire unattended, not wait on human approval). Best-effort: a
+// logging failure never fails the read that triggered it. lglRequest and
+// resolveDefaultNoteTypeId are injected by the caller (index.js) rather than
+// imported here, so this module has no dependency on the LGL HTTP client.
+export async function writeLglAccessNote(constituentId, toolName, { lglRequest, resolveDefaultNoteTypeId }) {
+  try {
+    const now = new Date();
+    const noteDate = now.toISOString().slice(0, 10);
+    const timestamp = now.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    const noteTypeId = await resolveDefaultNoteTypeId();
+    const body = {
+      text: `[AI Access Log] Record accessed via LGL MCP Server (${toolName}) on ${timestamp}.`,
+      note_date: noteDate,
+    };
+    if (noteTypeId !== null) body.note_type_id = noteTypeId;
+    await lglRequest("POST", `/constituents/${constituentId}/notes`, body);
+  } catch (err) {
+    console.error(`[access-audit] Failed to log note for constituent ${constituentId}: ${err.message}`);
+  }
+}
+
+// Dispatches to writeLglAccessNote or writeExcelAccessRow based on
+// deps.destination ("lgl_note", the default, or "excel"). The lgl_note
+// destination is gated by read-only/assisted mode, since it's a real write
+// to LGL and strict read-only means leaving zero footprint there. The excel
+// destination is not gated — it never touches LGL, so it logs in every mode.
+export async function logAccessEntry(constituentId, constituentName, toolName, deps) {
+  const { lglRequest, resolveDefaultNoteTypeId, readOnlyMode, assistedMode, destination, logPath } = deps;
+  const resolvedDestination = destination === "excel" ? "excel" : "lgl_note";
+  if (destination && destination !== resolvedDestination) {
+    console.error(
+      `[access-audit] Unrecognized LGL_ACCESS_LOG_DESTINATION "${destination}"; falling back to "lgl_note".`
+    );
+  }
+  if (resolvedDestination === "excel") {
+    await writeExcelAccessRow(constituentId, constituentName, toolName, logPath);
+    return;
+  }
+  if (readOnlyMode && !assistedMode) return;
+  await writeLglAccessNote(constituentId, toolName, { lglRequest, resolveDefaultNoteTypeId });
+}
