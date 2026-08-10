@@ -3196,7 +3196,12 @@ async function handleTool(name, args, authInfo) {
       // (not every account exposes them on every constituent), so swallow
       // 404s on those rather than failing the whole context call. The access
       // log runs after these resolve (not alongside) so it can use the
-      // already-fetched constituent's name without a second lookup.
+      // already-fetched constituent's name without a second lookup. Trade-off:
+      // if the primary constituent fetch (which has no .catch) rejects, the
+      // whole Promise.all throws and we never reach the log call below, so a
+      // failed access attempt goes unlogged — a deliberate change from the old
+      // fire-and-forget-inside-Promise.all behavior, since there's no name to
+      // log for a record that was never successfully fetched.
       const [constituent, giftsData, groupsData, notesData] = await Promise.all([
         lglRequest("GET", `/constituents/${id}`),
         lglRequest("GET", `/constituents/${id}/gifts?limit=${giftLimit}`).catch((e) => ({ _error: e.message })),
@@ -3238,6 +3243,15 @@ async function handleTool(name, args, authInfo) {
       const fetchOptional = (path) => lglRequest("GET", path).catch((e) => ({ _error: e.message }));
       const unwrap = (data) => (data?._error ? { error: data._error } : (data.items ?? data));
 
+      // The access log runs after Promise.all resolves (not alongside, as it
+      // did before) so it can use the already-fetched constituent's name
+      // without a second lookup. Trade-off: if the primary constituent fetch
+      // (which has no .catch, unlike the fetchOptional-wrapped sub-resources)
+      // rejects, the whole Promise.all throws and we never reach the log call
+      // below, so a failed access attempt goes unlogged — a deliberate change
+      // from the old fire-and-forget-inside-Promise.all behavior, since
+      // there's no name to log for a record that was never successfully
+      // fetched.
       const [
         constituent, giftsData, groupsData, notesData,
         relationshipsData, classAffiliationsData, membershipsData,
