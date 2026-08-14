@@ -51,6 +51,10 @@ LGL_MCP_TOKEN=your_secure_bearer_token_here
 # Optional: enables the submit_*_for_review tools — see "Human-Reviewed Writes" below
 LGL_INTEGRATION_LISTENER_URL=https://your-account.littlegreenlight.com/integrations/your-integration-id/listener
 
+# Optional: field-name casing for submit_*_for_review payloads — "snake"
+# (default) or "title" — see "Human-Reviewed Writes" below
+LGL_INTEGRATION_FIELD_CASE=snake
+
 # Optional: choose where the automatic access-audit trail is logged —
 # "lgl_note" (default) writes a note directly to LGL, "excel" appends a row
 # to a local spreadsheet instead. See "Access Audit Logging" below.
@@ -120,8 +124,8 @@ None of these five write to LGL directly — every submission lands in **Setting
 **Setup:**
 1. In LGL, go to *Settings → Integrations* and create (or reuse) a Custom Integration. Copy its listener URL.
 2. Set `LGL_INTEGRATION_LISTENER_URL` to that URL in your environment.
-3. In that integration's *field mapping* screen, map the field names your submissions will use (e.g. `first_name`, `phone`, `email_2`, `gift_amount`, `note_text`) to the corresponding LGL fields. **The mapping lives entirely in LGL's UI, not in this server** — a field that isn't mapped is silently ignored by LGL rather than causing an error, so an unmapped submission may look successful (HTTP 200) while carrying no usable data. Repeating fields (phone/email/address) use LGL's "Record Type / #" grouping: slot 1 is the bare field name (`phone`, `email`), slots 2–3 use a numeric suffix (`phone_2`, `email_3`).
-4. Because there's no LGL account whose mapping is identical out of the box, treat the field names above as a starting point and confirm against your own mapping screen before relying on a given tool.
+3. In that integration's *field mapping* screen, map the field names your submissions will use to the corresponding LGL fields. **The mapping lives entirely in LGL's UI, not in this server** — a field that isn't mapped is silently ignored by LGL rather than causing an error, so an unmapped submission may look successful (HTTP 200) while carrying no usable data. Repeating fields (phone/email/address) use LGL's "Record Type / #" grouping: slot 1 is the bare field name, slots 2–3 use a numeric suffix (`phone_2`, `email_3`).
+4. This server sends field names in one of two casings, controlled by `LGL_INTEGRATION_FIELD_CASE`: `"snake"` (default — e.g. `first_name`, `phone`, `gift_amount`) or `"title"` (e.g. `First name`, `Phone number`, `Gift amount`, translated via a lookup table in `index.js`). Match this to whichever casing your own mapping screen actually uses — some accounts map on the raw arg names directly, others (re)configure their mapping around LGL's own Title Case field labels. Because there's no LGL account whose mapping is identical out of the box, confirm against your own mapping screen before relying on a given tool either way.
 
 **Matching an existing constituent:** all five tools accept an optional `record_id` field carrying the LGL constituent ID. This is the preferred match key, but it only works if the integration's *record-matching preference* (in that integration's settings, alongside its field mapping) is set to ID-based matching — with the default email/name-based preference, an "LGL constituent ID" field mapping does not persist matches. If `record_id` is omitted, or your integration is still on email/name-based matching, LGL falls back to matching on `first_name` + `last_name` + `email`.
 

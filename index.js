@@ -145,7 +145,76 @@ async function resolveDefaultNoteTypeId() {
 // a shared queue, so strict read-only (no LGL_ASSISTED_MODE) blocks them too.
 // Field mapping (which key -> which LGL field) is configured in LGL's UI, not
 // here; sending an unmapped key is silently ignored by LGL rather than
-// erroring.
+// erroring. Some accounts map on our internal snake_case arg names directly;
+// others (re)configure their mapping to match LGL's own Title Case field
+// labels instead. LGL_INTEGRATION_FIELD_CASE picks which one this deployment
+// sends: "snake" (default — the raw arg names, e.g. "first_name") or "title"
+// (translated via FIELD_LABELS below, e.g. "First name"). record_id is always
+// left as-is either way — LGL treats it as a reserved ID-matching key, not a
+// mapped field.
+const FIELD_LABELS = {
+  // Constituent
+  constituent_type: "Constituent type", prefix: "Prefix", first_name: "First name",
+  middle_name: "Middle name", last_name: "Last name", suffix: "Suffix", maiden_name: "Maiden name",
+  organization_name: "Full Name", salutation: "Salutation", addressee: "Addressee",
+  alt_salutation: "Alt. salutation", alt_addressee: "Alt. addressee",
+  spouse_name: "Spouse/partner name", spouse_first_name: "Spouse/partner first name",
+  spouse_last_name: "Spouse/partner last name", spouse_nickname: "Spouse/partner nickname",
+  marital_status: "Marital status", honorary_name: "Honorary name", annual_report_name: "Annual report name",
+  company: "Employer/Organization", job_title: "Job title", birthday: "Birthday",
+  assistant_name: "Assistant name", nicknames: "Nicknames", external_id: "External constituent ID",
+  deceased: "Deceased?", deceased_date: "Deceased date", gives_anonymously: "Gives anonymously?",
+  contact_type: "Contact type", capacity: "Capacity", groups: "Groups", interest_level: "Interest level",
+  stewards: "Stewards", primary_steward: "Primary steward",
+  acknowledgment_preference: "Acknowledgment Preference", communication_tags: "Communication Tags",
+  relationship_from: "Relationship from", relationship_to: "Relationship to",
+  email: "Email address", email_type: "Email type", email_preferred: "Email preferred?",
+  email_invalid: "Inactive/invalid email?",
+  phone: "Phone number", phone_type: "Phone type", phone_invalid: "Inactive/invalid phone?",
+  phone_preferred: "Phone preferred?",
+  address_1_line1: "Address line 1", address_1_line2: "Address line 2", address_1_line3: "Address line 3",
+  address_1_city: "City", address_1_state: "State/province", address_1_zip: "Postal/ZIP code",
+  address_1_country: "Country", address_1_county: "County", address_1_type: "Address type",
+  address_1_preferred: "Address preferred?", address_1_invalid: "Inactive/invalid address?",
+  address_1_seasonal_from: "Seasonal from", address_1_seasonal_to: "Seasonal to",
+  website_1: "Website/URL", website_1_type: "Website type",
+  // Gift / pledge / goal / tribute
+  gift_type: "Gift type", gift_amount: "Gift amount", gift_date: "Gift date",
+  campaign_name: "Campaign name", fund_name: "Fund name", gift_appeal_name: "Gift appeal name",
+  gift_event_name: "Gift event name", gift_category: "Gift category", team_member: "Team member",
+  gift_note: "Gift note", external_gift_id: "External gift ID",
+  deductible_amount: "Deductible amount", deposited_amount: "Deposited amount", deposit_date: "Deposit date",
+  payment_type: "Payment type", check_number: "Check/reference No.",
+  ack_mailing_template: "Ack. mailing template", ack_mailing_date: "Ack. Mailing Date",
+  gift_is_anonymous: "Gift is anonymous?",
+  tribute_name: "Tribute Name", tribute_honoree_name: "Tribute Hon./Mem. Name",
+  tribute_dedication: "Tribute Dedication", tribute_recipient_name: "Tribute Recipient Name",
+  tribute_recipient_salutation: "Tribute Recipient Salutation", tribute_recipient_email: "Tribute Recipient Email",
+  tribute_recipient_address: "Tribute Recipient Address",
+  tribute_notification_template: "Tribute Notification Template",
+  installment_due_date: "Installment due date", payment_amount: "Payment amount",
+  pledge_amount: "Pledge amount", pledge_start_date: "Pledge start date", payment_interval: "Payment interval",
+  write_off_amount: "Write-off amount", write_off_date: "Write-off date",
+  auto_generate_installments: "Auto-generate installments?",
+  goal_name: "Goal Name", ask_amount: "Ask amount", projected_amount: "Projected amount",
+  projected_minimum_amount: "Projected minimum amount", goal_date: "Goal date", goal_status: "Goal status",
+  // Note
+  note_type: "Note type", note_date: "Note date - original", note_text: "Note text",
+  // Event registration
+  event_name: "Gen. event name", attended: "Attended?", inv_notes: "Inv. notes",
+  rsvp_status: "RSVP status", inv_attendee_count: "Inv. attendee count", inv_guest_names: "Inv. guest names",
+  date_attended: "Date attended", event_segment_name: "Event segment name", is_guest: "Is a guest?",
+  guest_first_name: "Guest First Name", guest_last_name: "Guest Last Name",
+  // Appeal request
+  appeal_name: "Gen. appeal name", appeal_segment_name: "Appeal segment name",
+  appeal_segment_code: "Appeal segment code", appeal_ask_amount: "Appeal ask amount",
+  appeal_status: "Appeal status", appeal_team_member: "Appeal team member",
+};
+// Note: LGL's reference list also carries "2nd"/"3rd" phone, email, and
+// address targets, plus several ID-only fields (LGL email/phone/gift ID,
+// etc.) that this tool doesn't collect — those slots (phone_2, phone_3,
+// address_2_*, email_2, email_3, ...) fall through untranslated below and
+// will need their own mapping entries in LGL if/when they're used.
 
 async function postToIntegrationQueue(fields) {
   const listenerUrl = process.env.LGL_INTEGRATION_LISTENER_URL;
@@ -155,10 +224,12 @@ async function postToIntegrationQueue(fields) {
     );
   }
 
+  const useTitleCase = process.env.LGL_INTEGRATION_FIELD_CASE === "title";
   const payload = new URLSearchParams();
   for (const [key, value] of Object.entries(fields)) {
     if (value !== undefined && value !== null && value !== "") {
-      payload.set(key, String(value));
+      const mappedKey = key === "record_id" || !useTitleCase ? key : (FIELD_LABELS[key] ?? key);
+      payload.set(mappedKey, String(value));
     }
   }
   if ([...payload.keys()].length === 0) {
