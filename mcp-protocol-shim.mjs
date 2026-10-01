@@ -47,6 +47,14 @@ http.Server.prototype.emit = function patchedEmit(event, ...args) {
       let protoNote = incoming || 'none';
       if (incoming && incoming !== ACCEPTED) {
         req.headers[PROTO] = ACCEPTED;
+        // The SDK reads rawHeaders, not the parsed copy — fix both.
+        if (Array.isArray(req.rawHeaders)) {
+          for (let i = 0; i < req.rawHeaders.length; i += 2) {
+            if (String(req.rawHeaders[i]).toLowerCase() === PROTO) {
+              req.rawHeaders[i + 1] = ACCEPTED;
+            }
+          }
+        }
         protoNote = `${incoming}->${ACCEPTED}`;
       }
 
