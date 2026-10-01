@@ -3629,6 +3629,8 @@ if (isHttpMode) {
         res.writeHead(405, { "Content-Type": "text/plain" });
         res.end("Method Not Allowed: this server speaks stateless Streamable HTTP; use POST.");
       }
+      return;
+    }
 
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
