@@ -3508,24 +3508,30 @@ function assertWriteAllowed(name) {
 
 // ─── Server Setup ────────────────────────────────────────────────────────────
 
-const server = new Server(
-  { name: "lgl-mcp", version: "1.7.0" },
-  { capabilities: { tools: {} } }
-);
+function buildServer() {
+  const s = new Server(
+    { name: "lgl-mcp", version: "1.7.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const tools = READ_ONLY_MODE ? TOOLS.filter((t) => isToolAllowed(t.annotations)) : TOOLS;
-  return { tools };
-});
+  s.setRequestHandler(ListToolsRequestSchema, async () => {
+    const tools = READ_ONLY_MODE ? TOOLS.filter((t) => isToolAllowed(t.annotations)) : TOOLS;
+    return { tools };
+  });
 
-server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-  try {
-    assertWriteAllowed(req.params.name);
-    return await handleTool(req.params.name, req.params.arguments ?? {}, extra.authInfo);
-  } catch (err) {
-    return toError(err);
-  }
-});
+  s.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
+    try {
+      assertWriteAllowed(req.params.name);
+      return await handleTool(req.params.name, req.params.arguments ?? {}, extra.authInfo);
+    } catch (err) {
+      return toError(err);
+    }
+  });
+
+  return s;
+}
+
+const server = buildServer();
 
 // Check if running in HTTP/SSE transport mode
 const args = process.argv.slice(2);
@@ -3547,13 +3553,7 @@ if (isHttpMode) {
     port = parseInt(args[portIndex + 1], 10);
   }
 
-  // Stateful Streamable HTTP Transport
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true    
-  });
-
-  await server.connect(transport);
+  // Stateless Streamable HTTP: a fresh server and transport are built per request.
 
   const httpServer = http.createServer(async (req, res) => {
     const parsedUrl = parse(req.url, true);
@@ -3599,21 +3599,36 @@ if (isHttpMode) {
         let body = "";
         req.on("data", chunk => { body += chunk; });
         req.on("end", async () => {
+          const reqServer = buildServer();
+          const reqTransport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+            enableJsonResponse: true
+          });
+          res.on("close", () => {
+            Promise.resolve(reqTransport.close()).catch(() => {});
+            Promise.resolve(reqServer.close()).catch(() => {});
+          });
           try {
             const parsed = body ? JSON.parse(body) : undefined;
-            await transport.handleRequest(req, res, parsed);
+            await reqServer.connect(reqTransport);
+            await reqTransport.handleRequest(req, res, parsed);
           } catch (err) {
-            console.error("Error parsing JSON body or handling request:", err);
-            res.writeHead(400, { "Content-Type": "text/plain" });
-            res.end(`Bad Request: ${err.message}`);
+            console.error("Error handling MCP request:", err);
+            if (!res.headersSent) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32603, message: `Internal server error: ${err.message}` },
+                id: null
+              }));
+            }
           }
         });
       } else {
-        // GET requests (for establishing the SSE event-stream)
-        await transport.handleRequest(req, res);
+        // Stateless mode keeps no long-lived stream for a GET to attach to.
+        res.writeHead(405, { "Content-Type": "text/plain" });
+        res.end("Method Not Allowed: this server speaks stateless Streamable HTTP; use POST.");
       }
-      return;
-    }
 
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
