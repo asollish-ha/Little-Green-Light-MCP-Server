@@ -3549,7 +3549,8 @@ if (isHttpMode) {
 
   // Stateful Streamable HTTP Transport
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true    
   });
 
   await server.connect(transport);
