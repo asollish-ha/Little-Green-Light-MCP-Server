@@ -3549,7 +3549,7 @@ if (isHttpMode) {
 
   // Stateful Streamable HTTP Transport
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID()
+    sessionIdGenerator: undefined
   });
 
   await server.connect(transport);
