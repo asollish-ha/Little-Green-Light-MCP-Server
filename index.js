@@ -6,6 +6,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { logAccessEntry } from "./access-log.js";
+import { timingSafeEqual } from "node:crypto";
 
 const LGL_BASE = "https://api.littlegreenlight.com/api/v1";
 const API_KEY = process.env.LGL_API_KEY;
@@ -399,15 +400,57 @@ function withTruncationHint(items, limit) {
   };
 }
 
+function constituentName(c) {
+  return `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || c.org_name || `ID ${c.id}`;
+}
+
+// Use ONLY on a record from GET /constituents/{id}, which embeds
+// email_addresses/phone_numbers/street_addresses. The /constituents and
+// /constituents/search endpoints do NOT return those arrays and have no
+// expand/include parameter, so calling this on a search or list result
+// silently reported every constituent as having no email, phone, city or
+// state — indistinguishable in the output from genuinely empty fields.
+// Search- and list-derived results use summaryConstituentBasic instead.
 function summaryConstituent(c) {
   return {
     id: c.id,
-    name: `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || c.org_name || `ID ${c.id}`,
+    name: constituentName(c),
     email: c.email_addresses?.[0]?.address ?? null,
     phone: c.phone_numbers?.[0]?.number ?? null,
     city: c.street_addresses?.[0]?.city ?? null,
     state: c.street_addresses?.[0]?.state ?? null,
   };
+}
+
+// For records from /constituents or /constituents/search. Omits the contact
+// fields entirely rather than emitting nulls the caller would read as "no
+// email on file." Contact details come from get_constituent, or from the
+// list_email_addresses / list_phone_numbers / list_addresses tools.
+function summaryConstituentBasic(c) {
+  return { id: c.id, name: constituentName(c) };
+}
+
+// Full records for a set of ids, with bounded concurrency so a large account
+// doesn't fire thousands of unbounded parallel requests. Used where contact
+// info is genuinely needed across many constituents and the search endpoint
+// can't supply it. Failures are returned as nulls and counted, never silently
+// treated as "no data" — that conflation is the bug this exists to avoid.
+const FULL_FETCH_CONCURRENCY = 8;
+async function fetchConstituentsFull(ids, { cap = 2000 } = {}) {
+  const capped = ids.slice(0, cap);
+  const out = [];
+  let failed = 0;
+  for (let i = 0; i < capped.length; i += FULL_FETCH_CONCURRENCY) {
+    const batch = capped.slice(i, i + FULL_FETCH_CONCURRENCY);
+    const settled = await Promise.all(
+      batch.map((id) => lglRequest("GET", `/constituents/${id}`).catch(() => null))
+    );
+    for (const c of settled) {
+      if (c) out.push(c);
+      else failed++;
+    }
+  }
+  return { records: out, failed, truncated: capped.length < ids.length };
 }
 
 // /gifts/search (what recent_donors/lapsed_donors/top_donors aggregate over)
@@ -426,7 +469,7 @@ async function resolveConstituentNames(ids) {
     capped.map(async (id) => {
       try {
         const c = await lglRequest("GET", `/constituents/${id}`);
-        names[id] = summaryConstituent(c).name;
+        names[id] = constituentName(c);
       } catch (err) {
         // Only a genuine 404 means "this constituent doesn't exist" — any
         // other failure (rate limit, network, auth) is transient and
@@ -478,7 +521,7 @@ async function resolveConstituentId(args) {
     throw new Error(`No constituent found matching "${args.name}". Try a broader query with search_constituents.`);
   }
   if (matches.length > 1) {
-    const candidates = matches.slice(0, 10).map(summaryConstituent);
+    const candidates = matches.slice(0, 10).map(summaryConstituentBasic);
     throw new Error(
       `Multiple constituents match "${args.name}". Re-call with a specific constituent_id. Candidates: ${JSON.stringify(candidates)}`
     );
@@ -629,12 +672,12 @@ async function buildAdvancedSearchParams(args) {
   return params;
 }
 
-// Same shape as summaryConstituent plus the custom attribute values that
+// Same shape as summaryConstituentBasic plus the custom attribute values that
 // were actually fetched via expand=custom_attrs (only present when
 // include_custom_attrs was requested — see buildAdvancedSearchParams) — kept
-// separate from summaryConstituent so existing tools' output is untouched.
+// separate from summaryConstituentBasic so existing tools' output is untouched.
 function summaryConstituentWithAttrs(c) {
-  return { ...summaryConstituent(c), custom_attrs: c.custom_attrs ?? [] };
+  return { ...summaryConstituentBasic(c), custom_attrs: c.custom_attrs ?? [] };
 }
 
 // LGL's field names for amount/date are inconsistent across endpoints: the
@@ -2269,14 +2312,14 @@ async function handleTool(name, args, authInfo) {
     case "search_constituents": {
       const params = constituentSearchParams(args.query, args.limit ?? 20);
       const data = await lglRequest("GET", `/constituents/search?${params}`);
-      return toText((data.items ?? data).map(summaryConstituent));
+      return toText((data.items ?? data).map(summaryConstituentBasic));
     }
 
     case "search_constituents_advanced": {
       const params = await buildAdvancedSearchParams({ limit: 20, offset: 0, ...args });
       const data = await lglRequest("GET", `/constituents/search?${params}`);
       const items = data.items ?? data;
-      const summaries = args.include_custom_attrs ? items.map(summaryConstituentWithAttrs) : items.map(summaryConstituent);
+      const summaries = args.include_custom_attrs ? items.map(summaryConstituentWithAttrs) : items.map(summaryConstituentBasic);
       return toText(summaries);
     }
 
@@ -2297,7 +2340,7 @@ async function handleTool(name, args, authInfo) {
       const result = {
         attribute: args.name,
         count: neverTouched.length,
-        constituents: neverTouched.slice(0, limit).map(summaryConstituent),
+        constituents: neverTouched.slice(0, limit).map(summaryConstituentBasic),
       };
       if (truncated) {
         result.truncated = true;
@@ -2309,7 +2352,7 @@ async function handleTool(name, args, authInfo) {
     case "list_constituents": {
       const params = new URLSearchParams({ limit: args.limit ?? 50, offset: args.offset ?? 0 });
       const data = await lglRequest("GET", `/constituents?${params}`);
-      return toText((data.items ?? data).map(summaryConstituent));
+      return toText((data.items ?? data).map(summaryConstituentBasic));
     }
 
     case "get_constituent": {
@@ -3237,12 +3280,25 @@ async function handleTool(name, args, authInfo) {
       // the full dataset via paginateConstituentSearch (same pattern as
       // constituents_never_touched_attribute) and surface truncation if the
       // account is large enough to hit that helper's own page cap.
+      // The scan above yields /constituents/search records, which do NOT
+      // include email_addresses/phone_numbers/street_addresses — so testing
+      // those arrays on a search result marked EVERY constituent as missing
+      // EVERY field (verified live: 1,230 of 1,230 "missing email", including
+      // records with an email plainly on file). LGL offers no expand/include
+      // on the search endpoint, so the only correct source is the per-record
+      // GET /constituents/{id}, which does embed them. That means one request
+      // per constituent: slow by nature, and the reason for the bounded
+      // concurrency and the cap.
       const limit = args.limit ?? 50;
       const missing_fields = args.missing;
-      const { items: all, truncated } = await paginateConstituentSearch(new URLSearchParams());
-      const results = [];
+      const { items: all, truncated: scanTruncated } =
+        await paginateConstituentSearch(new URLSearchParams());
 
-      for (const c of all) {
+      const { records, failed, truncated: fetchTruncated } =
+        await fetchConstituentsFull(all.map((c) => c.id));
+
+      const results = [];
+      for (const c of records) {
         const absent = [];
         if (missing_fields.includes("email") && !(c.email_addresses?.length)) absent.push("email");
         if (missing_fields.includes("phone") && !(c.phone_numbers?.length)) absent.push("phone");
@@ -3250,11 +3306,27 @@ async function handleTool(name, args, authInfo) {
         if (absent.length > 0) results.push({ ...summaryConstituent(c), missing_fields: absent });
       }
 
-      const result = { count: results.length, constituents: results.slice(0, limit) };
-      if (truncated) {
+      const result = {
+        count: results.length,
+        scanned: records.length,
+        constituents: results.slice(0, limit),
+      };
+      const notes = [];
+      if (scanTruncated) {
         result.truncated = true;
-        result.note = "Underlying constituent scan hit the page cap (5000 records) — count and results may be incomplete for very large accounts.";
+        notes.push("Constituent scan hit the page cap (5,000 records) — results may be incomplete.");
       }
+      if (fetchTruncated) {
+        result.truncated = true;
+        notes.push("More constituents exist than the per-record fetch cap (2,000); the remainder were not checked.");
+      }
+      if (failed > 0) {
+        // Never fold a failed lookup into the "missing" bucket — that is the
+        // same conflation of "no data" with "not retrieved" that broke this
+        // tool in the first place.
+        notes.push(`${failed} record(s) could not be fetched and were EXCLUDED from the results rather than counted as missing.`);
+      }
+      if (notes.length > 0) result.notes = notes;
       return toText(result);
     }
 
@@ -3578,13 +3650,24 @@ if (isHttpMode) {
         token = authHeader.substring(7);
       }
 
+      // Fail CLOSED. An unset or empty token must never mean "allow everyone":
+      // this endpoint is on the public internet and the token is the only thing
+      // standing between it and the donor database.
       const expectedToken = process.env.LGL_MCP_TOKEN;
-      if (expectedToken) {
-        if (token !== expectedToken) {
-          res.writeHead(401, { "Content-Type": "text/plain" });
-          res.end("Unauthorized: Invalid or missing LGL_MCP_TOKEN Bearer token.");
-          return;
-        }
+      if (!expectedToken) {
+        console.error("REFUSED /mcp request: LGL_MCP_TOKEN is not set.");
+        res.writeHead(503, { "Content-Type": "text/plain" });
+        res.end("Service misconfigured: LGL_MCP_TOKEN is not set. Refusing all requests.");
+        return;
+      }
+
+      // Constant-time comparison, so response latency can't leak the token.
+      const givenBuf = Buffer.from(token, "utf8");
+      const expectedBuf = Buffer.from(expectedToken, "utf8");
+      if (givenBuf.length !== expectedBuf.length || !timingSafeEqual(givenBuf, expectedBuf)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("Unauthorized: Invalid or missing LGL_MCP_TOKEN Bearer token.");
+        return;
       }
 
       // Attach auth info to request
@@ -3642,10 +3725,10 @@ if (isHttpMode) {
       console.error("Secure Bearer Token Authentication is ENABLED.");
     } else {
       console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-      console.error("! WARNING: LGL_MCP_TOKEN is not set — this endpoint accepts        !");
-      console.error("! requests from ANYONE who can reach it, with NO authentication.   !");
-      console.error("! Only run unauthenticated if this port is bound to localhost or   !");
-      console.error("! otherwise unreachable from outside this machine.                 !");
+      console.error("! WARNING: LGL_MCP_TOKEN is not set. Authentication CANNOT be      !");
+      console.error("! performed, so /mcp will refuse every request with a 503 rather   !");
+      console.error("! than serve the donor database unauthenticated.                   !");
+      console.error("! Set LGL_MCP_TOKEN in the environment to bring the server up.     !");
       console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     }
   });
